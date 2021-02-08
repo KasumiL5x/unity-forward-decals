@@ -15,11 +15,11 @@ public class ForwardDecalSystem : MonoBehaviour {
     public bool renderDynamic = true;
   }
 
-  // If true, will update static decals while in the editor (else they only position upon initial build).
-  [SerializeField] bool updateStaticInEditor = true;
-
   // Should debug messages be printed?
   [SerializeField] bool printDebug = true;
+  
+  // If true, will update static decals while in the editor (else they only position upon initial build).
+  [SerializeField] bool updateStatic = true;
 
   // All cameras that will render decals. CommandBuffers are assigned on rebuild.
   [SerializeField] List<DecalCamera> allCameras = new List<DecalCamera>();
@@ -34,14 +34,53 @@ public class ForwardDecalSystem : MonoBehaviour {
   }
 
   // Static decals.
-  CommandBuffer staticBuffer;
+  const string STATIC_BUFFER_NAME = "ForwardDecalSystem_StaticBuffer";
   HashSet<ForwardDecal> staticDecals = new HashSet<ForwardDecal>();
+  CommandBuffer staticBuffer;
 
   // Dynamic decals.
-  CommandBuffer dynamicBuffer;
+  const string DYNAMIC_BUFFER_NAME = "ForwardDecalSystem_DynamicBuffer";
   HashSet<ForwardDecal> dynamicDecals = new HashSet<ForwardDecal>();
+  CommandBuffer dynamicBuffer;
 
-  void Awake() {
+  bool initialized = false; // Set in OnEnable() to prevent issues with OnValidate().
+
+  void OnEnable() {
+    EnableDepth();
+    CreateFallbackMesh();
+    Rebuild();
+    initialized = true;
+  }
+
+  void OnDisable() {
+    RemoveBuffersFromDecalCameras();
+    initialized = false;
+  }
+
+  void OnValidate() {
+    // Unity triggers this function on script reload and inspector value change.
+    // This check avoids calling at the wrong time before OnEnabled() is triggered.
+    if(initialized) {
+      Rebuild();
+    }
+  }
+
+  void LateUpdate() {
+    if(updateStatic) {
+      UpdateStaticBuffer();
+    }
+    UpdateDynamicBuffer();
+  }
+
+  void EnableDepth() {
+    foreach(var decalCam in allCameras) {
+      if(decalCam.camera != null) {
+        decalCam.camera.depthTextureMode = DepthTextureMode.Depth;
+      }
+    }
+  }
+
+  void CreateFallbackMesh() {
     // Create the fallback mesh.
     if(null == fallbackMesh) {
       var tmp = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -50,11 +89,31 @@ public class ForwardDecalSystem : MonoBehaviour {
 
       Log("Created fallback mesh.");
     }
-
-    Rebuild();
   }
 
-void PopulateDecalLists() {
+  public void Rebuild() {
+    // Clear initial decal lists.
+    staticDecals = new HashSet<ForwardDecal>();
+    dynamicDecals = new HashSet<ForwardDecal>();
+
+    // Populate initial decal lists.
+    PopulateDecalLists();
+
+    // Build initial buffers.
+    BuildBuffers();
+
+    // Update initial decals.
+    UpdateStaticBuffer();
+    UpdateDynamicBuffer();
+
+    // (Re)assign buffers to cameras accordingly.
+    RemoveBuffersFromDecalCameras();
+    AssignBuffersToDecalCameras();
+
+    Log($"Rebuild complete with {staticDecals.Count} static and {dynamicDecals.Count} dynamic decals.");
+  }
+
+  void PopulateDecalLists() {
     foreach(var decal in allDecals) {
       if(null == decal) {
         continue;
@@ -68,33 +127,34 @@ void PopulateDecalLists() {
     }
   }
 
-  void BuildBuffers() {
+    void BuildBuffers() {
     if(null == staticBuffer) {
-      Log("Creating new static buffer.");
       staticBuffer = new CommandBuffer();
-      staticBuffer.name = "ForwardDecalSystem_StaticBuffer";
+      staticBuffer.name = ForwardDecalSystem.STATIC_BUFFER_NAME;
+      Log("Created new static buffer.");
     }
 
     if(null == dynamicBuffer) {
-      Log("Creating new dynamic buffer.");
       dynamicBuffer = new CommandBuffer();
-      dynamicBuffer.name = "ForwardDecalSystem_DynamicBuffer";
+      dynamicBuffer.name = ForwardDecalSystem.DYNAMIC_BUFFER_NAME;
+      Log("Created new dynamic buffer.");
     }
   }
 
   void UpdateStaticBuffer() {
+    if(null == fallbackMesh) {
+      LogError("updating static buffer as fallback mesh was null.");
+      return;
+    }
     if(null == staticBuffer) {
       LogError("updating static buffer when it didn't exist.");
       return;
     }
-    // Log($"Updating existing static buffer ({staticDecals.Count} decals).");
 
-    if(0 == staticDecals.Count) {
-      staticBuffer.Clear(); // Empty buffer.
-    } else {
-      // Clear any previous commands.
-      staticBuffer.Clear();
+    // Clear any previous commands.
+    staticBuffer.Clear();
 
+    if(staticDecals.Count > 0) {
       // Copy screen texture and set it globally.
       var screenTexID = Shader.PropertyToID("ForwardDecalSystem_Static_ScreenTex");
       staticBuffer.GetTemporaryRT(screenTexID, -1, -1);
@@ -120,18 +180,21 @@ void PopulateDecalLists() {
   }
 
   void UpdateDynamicBuffer() {
+    if(null == fallbackMesh) {
+      LogError("updating dynamic buffer as fallback mesh was null.");
+      return;
+    }
     if(null == dynamicBuffer) {
       LogError("updating dynamic buffer when it didn't exist.");
       return;
     }
-    // Log($"Updating existing dynamic buffer ({dynamicDecals.Count} decals).");
 
-    if(0 == dynamicDecals.Count) {
-      dynamicBuffer.Clear(); // Empty buffer.
-    } else {
-      dynamicBuffer.Clear();
+    // Basically the same as updating the static buffer.
 
-      var screenTexID = Shader.PropertyToID("ForwardDecalSystem_Dynamc_ScreenTex");
+    dynamicBuffer.Clear();
+
+    if(dynamicDecals.Count > 0) {
+      var screenTexID = Shader.PropertyToID("ForwardDecalSystem_Dynamic_ScreenTex");
       dynamicBuffer.GetTemporaryRT(screenTexID, -1, -1);
       dynamicBuffer.Blit(BuiltinRenderTextureType.CameraTarget, screenTexID);
       dynamicBuffer.SetGlobalTexture("_FDS_ScreenTex", screenTexID);
@@ -143,6 +206,10 @@ void PopulateDecalLists() {
           LogError($"when rendering dynamic decal {decal.name}.");
           continue;
         }
+        // Respect decals that are disabled in the hierarchy.
+        if(!decal.gameObject.activeInHierarchy) {
+          continue;
+        }
         var mesh = (null == decal.Mesh) ? fallbackMesh : decal.Mesh;
         dynamicBuffer.DrawMesh(mesh, decal.transform.localToWorldMatrix, decal.Material);
       }
@@ -151,68 +218,38 @@ void PopulateDecalLists() {
     }
   }
 
-  void RemoveBuffersFromCamera(Camera cam, CameraEvent cameraEvent, bool includeStatic, bool includeDynamic) {
-    if(null == staticBuffer || null == dynamicBuffer) {
-      LogError($"removing buffers from {cam.name}; static={staticBuffer}, dynamic={dynamicBuffer}.");
-      return;
-    }
-
-    var existing = cam.GetCommandBuffers(cameraEvent);
-
-    if(includeStatic) {
-      // // Try to remove the real one.
-      // cam.RemoveCommandBuffer(cameraEvent, staticBuffer);
-      // // Seems it's not always recognized, so the editor may 
-      if(existing.FirstOrDefault(x => x.name == staticBuffer.name) != null) {
-        Log($"Removing static buffer from {cam.name} at {cameraEvent}.");
-        cam.RemoveCommandBuffer(cameraEvent, staticBuffer);
-      } else {
-        LogError($"removing static buffer from {cam.name} as it didn't exist.");
-      }
-    }
-
-    if(includeDynamic) {
-      if(existing.FirstOrDefault(x => x.name == dynamicBuffer.name) != null) {
-        Log($"Removing dynamic buffer from {cam.name} at {cameraEvent}.");
-        cam.RemoveCommandBuffer(cameraEvent, dynamicBuffer);
-      } else {
-        LogError($"removing dynamic buffer from {cam.name} as it didn't exist.");
-      }
-    }
-  }
-
   void RemoveBuffersFromDecalCameras() {
     foreach(var decalCam in allCameras) {
       if(null == decalCam.camera) {
         continue;
       }
-      RemoveBuffersFromCamera(decalCam.camera, decalCam.cameraEvent, decalCam.renderStatic, decalCam.renderDynamic);
+      RemoveBuffersFromCamera(decalCam.camera);
     }
   }
+  
 
-  void AssignBuffersToCamera(Camera cam, CameraEvent cameraEvent, bool includeStatic, bool includeDynamic) {
+  void RemoveBuffersFromCamera(Camera cam) {
     if(null == staticBuffer || null == dynamicBuffer) {
-      LogError($"assigning buffers to {cam.name}; static={staticBuffer}, dynamic={dynamicBuffer}.");
+      LogError($"removing buffers from {cam.name}; static={staticBuffer}, dynamic={dynamicBuffer}.");
       return;
     }
 
-    var existing = cam.GetCommandBuffers(cameraEvent);
+    // As the event can change in the inspector, we don't know which one was previous.
+    // To make things easier, just remove all buffers with matching names.
 
-    if(includeStatic) {
-      if(existing.FirstOrDefault(x => x.name == staticBuffer.name) != null) {
-        LogError($"assigning static buffer to {cam.name} as it already existed.");
-      } else {
-        Log($"Assigning static buffer to {cam.name} at {cameraEvent}.");
-        cam.AddCommandBuffer(cameraEvent, staticBuffer);
+    foreach(var evt in Enum.GetValues(typeof(CameraEvent))) {
+      var allBuffers = cam.GetCommandBuffers((CameraEvent)evt);
+
+      var existingStatic = allBuffers.FirstOrDefault(x => x.name == ForwardDecalSystem.STATIC_BUFFER_NAME);
+      if(existingStatic != null) {
+        cam.RemoveCommandBuffer((CameraEvent)evt, existingStatic);
+        Log($"Removed static buffer from camera at {(CameraEvent)evt}.");
       }
-    }
 
-    if(includeDynamic) {
-      if(existing.FirstOrDefault(x => x.name == dynamicBuffer.name) != null) {
-        LogError($"assigning dynamic buffer to {cam.name} as it already existed.");
-      } else {
-        Log($"Assigning dynamic buffer to {cam.name} at {cameraEvent}.");
-        cam.AddCommandBuffer(cameraEvent, dynamicBuffer);
+      var existingDynamic = allBuffers.FirstOrDefault(x => x.name == ForwardDecalSystem.DYNAMIC_BUFFER_NAME);
+      if(existingDynamic != null) {
+        cam.RemoveCommandBuffer((CameraEvent)evt, existingDynamic);
+        Log($"Removed dynamic buffer from camera at {(CameraEvent)evt}.");
       }
     }
   }
@@ -226,36 +263,38 @@ void PopulateDecalLists() {
     }
   }
 
-  public void ReassignBuffers() {
+  void AssignBuffersToCamera(Camera cam, CameraEvent cameraEvent, bool includeStatic, bool includeDynamic) {
     if(null == staticBuffer || null == dynamicBuffer) {
+      LogError($"assigning buffers to {cam.name}; static={staticBuffer}, dynamic={dynamicBuffer}.");
       return;
     }
 
-    RemoveBuffersFromDecalCameras();
-    AssignBuffersToDecalCameras();
-  }
+    var existing = cam.GetCommandBuffers(cameraEvent);
 
-  public void Rebuild() {
-    // Clear initial decal lists.
-    staticDecals.Clear();
-    dynamicDecals.Clear();
+    if(includeStatic) {
+      if(existing.FirstOrDefault(x => x.name == ForwardDecalSystem.STATIC_BUFFER_NAME) != null) {
+        LogError($"assigning static buffer to {cam.name} as it already existed.");
+      } else {
+        cam.AddCommandBuffer(cameraEvent, staticBuffer);
+        Log($"Assigned static buffer to {cam.name} at {cameraEvent}.");
+      }
+    }
 
-    // Populate initial decal lists.
-    PopulateDecalLists();
-
-    // Build initial buffers.
-    BuildBuffers();
-
-    // Update initial decals.
-    UpdateStaticBuffer();
-    UpdateDynamicBuffer();
-
-    // (Re)assign buffers to cameras accordingly.
-    RemoveBuffersFromDecalCameras();
-    AssignBuffersToDecalCameras();
+    if(includeDynamic) {
+      if(existing.FirstOrDefault(x => x.name == ForwardDecalSystem.DYNAMIC_BUFFER_NAME) != null) {
+        LogError($"assigning dynamic buffer to {cam.name} as it already existed.");
+      } else {
+        cam.AddCommandBuffer(cameraEvent, dynamicBuffer);
+        Log($"Assigned dynamic buffer to {cam.name} at {cameraEvent}.");
+      }
+    }
   }
 
   public void Add(ForwardDecal decal) {
+    if(!initialized) {
+      return;
+    }
+
     if(decal.IsStatic && !staticDecals.Contains(decal)) {
       Log($"Adding static decal {decal.name}.");
       staticDecals.Add(decal);
@@ -268,6 +307,10 @@ void PopulateDecalLists() {
   }
 
   public void Remove(ForwardDecal decal) {
+    if(!initialized) {
+      return;
+    }
+
     // Attempt to remove from both as if it's in a list and its static flag
     // is toggled, it wouldn't be removed from the old list if we check that flag.
 
@@ -280,26 +323,6 @@ void PopulateDecalLists() {
       Log($"Removing dynamic decal {decal.name}.");
       UpdateDynamicBuffer();
     }
-  }
-
-  void OnEnable() {
-    Rebuild(); // Editor can trigger this on script rebuilds and can nullify buffers, so just rebuild it.
-  }
-
-  void OnDisable() {
-    RemoveBuffersFromDecalCameras();
-  }
-
-  void LateUpdate() {
-    // Rebuild static when in the editor so that the preview updates. In a build, this won't happen unless manually updated.
-    #if UNITY_EDITOR
-    if(updateStaticInEditor) {
-      UpdateStaticBuffer();
-    }
-    #endif
-
-    // Rebuild every frame. Ideally this would rebuild as an observer or event system when a constituent changes, but that's for another time.
-    UpdateDynamicBuffer();
   }
 
   void Log(string msg) {

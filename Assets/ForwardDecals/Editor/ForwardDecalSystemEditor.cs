@@ -7,6 +7,7 @@ public class ForwardDecalSystemEditor : Editor {
     var sys = (ForwardDecalSystem)target;
 
     EditorGUILayout.PropertyField(serializedObject.FindProperty("printDebug"));
+    EditorGUILayout.PropertyField(serializedObject.FindProperty("updateStatic"));
 
     // This class doesn't support being edited while in play mode due to command buffers being assigned on rebuild.
     GUI.enabled = !Application.isPlaying;
@@ -16,15 +17,9 @@ public class ForwardDecalSystemEditor : Editor {
     var decalList = serializedObject.FindProperty("allDecals");
     EditorGUILayout.PropertyField(decalList, new GUIContent("Initial Decals"), true);
 
-    EditorGUILayout.PropertyField(serializedObject.FindProperty("updateStaticInEditor"));
-
     GUILayout.Space(15.0f);
     if(GUILayout.Button("Force Rebuild", GUILayout.Height(30.0f))) {
       sys.Rebuild();
-    }
-
-    if(GUILayout.Button("Reassign Buffers", GUILayout.Height(30.0f))) {
-      sys.ReassignBuffers();
     }
 
     GUI.enabled = true;
