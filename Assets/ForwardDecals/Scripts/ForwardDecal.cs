@@ -40,5 +40,11 @@ public class ForwardDecal : MonoBehaviour {
     col.a = selected ? 0.5f : 0.2f;
     Gizmos.color = col;
     Gizmos.DrawWireMesh(mesh, Vector3.zero, Quaternion.identity, Vector3.one);
+
+    // Draw direction.
+    Gizmos.color = Color.red;
+    var rayStart = Vector3.zero;
+    var rayEnd = Vector3.down * 0.75f;
+    Gizmos.DrawLine(rayStart, rayEnd);
   }
 }
